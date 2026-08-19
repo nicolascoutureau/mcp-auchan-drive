@@ -6,9 +6,10 @@
  *   - ChromeCookieProvider  : lit les cookies depuis le profil Chrome local
  *   - FirefoxCookieProvider : lit cookies.sqlite depuis le profil Firefox local
  *
- * Cookies requis (communs) : lark-session, datadome, lark-consentId
- * (Firefox peut ne pas avoir datadome si aucun challenge DataDome n'a été déclenché
- *   sur ce profil — les requêtes risquent alors d'être bloquées 403)
+ * Cookies requis (communs) : lark-session, lark-consentId
+ * (datadome est optionnel : Auchan ne le pose qu'après un challenge DataDome —
+ *   son absence déclenche seulement un avertissement, les requêtes passent
+ *   tant qu'aucun challenge n'est déclenché)
  *
  * Sélection du provider :
  *   AUCHAN_COOKIE défini          → EnvCookieProvider
@@ -24,14 +25,12 @@ import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
 
-// Cookies toujours requis (quelle que soit l'implémentation)
-const REQUIRED = ['lark-session', 'datadome', 'lark-consentId'] as const;
-const AUCHAN_URL = 'https://www.auchan.fr';
-
-// Pour Firefox : ces cookies sont obligatoires pour s'authentifier.
+// Cookies obligatoires pour s'authentifier (Chrome et Firefox).
 // Tous les autres cookies www.auchan.fr / .auchan.fr sont envoyés automatiquement
 // (comme un navigateur), ce qui inclut connect.sid, lark-browser-uuid, etc.
-const FF_REQUIRED = ['lark-session', 'lark-consentId'] as const;
+// datadome n'en fait pas partie : il n'existe qu'après un challenge DataDome.
+const REQUIRED = ['lark-session', 'lark-consentId'] as const;
+const AUCHAN_URL = 'https://www.auchan.fr';
 
 // ─── EnvCookieProvider ────────────────────────────────────────────────────────
 
@@ -85,7 +84,19 @@ export class ChromeCookieProvider implements CookieProvider {
       throw new Error('Missing required cookies: ' + missing.join(', '));
     }
 
-    this.cached = REQUIRED.map((name) => name + '=' + all[name]).join('; ');
+    if (!all['datadome']) {
+      console.warn(
+        '[auchan-drive] Cookie datadome absent du profil Chrome. ' +
+        'Il n\'apparaît qu\'après un challenge DataDome — ' +
+        'les requêtes passeront tant qu\'aucun challenge n\'est déclenché (sinon 403).',
+      );
+    }
+
+    // Inclure TOUS les cookies récupérés (comportement navigateur) :
+    // lark-session, lark-consentId, connect.sid, XSRF-TOKEN, etc.
+    this.cached = Object.entries(all)
+      .map(([name, value]) => `${name}=${value}`)
+      .join('; ');
     return this.cached;
   }
 
@@ -242,7 +253,7 @@ export class FirefoxCookieProvider implements CookieProvider {
     const dbPath = await this.findCookiesDb();
     const cookies = await this.readCookiesFromDb(dbPath);
 
-    const missing = FF_REQUIRED.filter((name) => !cookies[name]);
+    const missing = REQUIRED.filter((name) => !cookies[name]);
     if (missing.length > 0) {
       throw new Error(
         `Cookies Firefox manquants pour Auchan Drive : ${missing.join(', ')}. ` +
