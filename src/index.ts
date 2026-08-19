@@ -23,6 +23,8 @@ import type { OrderPeriod } from './types.js';
 // Cache de recherche : productId → SearchProduct complet
 // Nécessaire car add_to_cart reçoit seulement productId mais client.addToCart()
 // a besoin de offerId / sellerId / sellerType
+// Accumule les résultats de toutes les recherches de la session ; vidé uniquement
+// au changement de drive (offerId / sellerId sont propres à chaque magasin).
 const searchCache = new Map<string, SearchProduct>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -59,7 +61,6 @@ async function main(): Promise<void> {
     async ({ query }) => {
       try {
         const results = await client.search(query);
-        searchCache.clear();
         for (const p of results) searchCache.set(p.productId, p);
         return ok(results);
       } catch (err) {
@@ -213,6 +214,7 @@ async function main(): Promise<void> {
     async ({ store_id, store_name }) => {
       try {
         await storeManager.setActiveStore(store_id, store_name);
+        searchCache.clear();
         return ok({ success: true, storeId: store_id, storeName: store_name ?? null });
       } catch (err) {
         return fail(err);
