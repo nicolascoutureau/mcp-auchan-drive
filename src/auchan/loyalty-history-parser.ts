@@ -1,49 +1,54 @@
 /**
- * loyalty-history-parser.ts — Parse le HTML de GET /fidelite/ma-carte/historique
+ * loyalty-history-parser.ts — Parse le HTML de GET /fidelite/ma-carte/historique?id=NNN
  * Même approche que loyalty-parser.ts : regex sur le HTML brut, pas de cheerio/jsdom.
  */
 
 import type { LoyaltyTransaction } from '../types.js';
-import { parsePrice } from './html-utils.js';
+import { decode, parsePrice } from './html-utils.js';
 
 export type { LoyaltyTransaction };
 
+/**
+ * Parse la page HTML de l'historique de cagnotte et retourne les transactions.
+ *
+ * Structure HTML attendue (blocs `m-waaohHistory`, groupés par mois) :
+ * ```html
+ * <div class="a-waaohHistoryMonth" role="heading">July</div>
+ * <div role="list">
+ *   <div class="m-waaohHistory" role="listitem">
+ *     <div class="m-waaohHistory__date">16/07/2026</div>
+ *     <div class="m-waaohHistory__deliveryType">Drive</div>
+ *     <div class="m-waaohHistory__deliveryPlace">Auchan DRIVE</div>
+ *     <div class="m-waaohHistory__amount -minus">-5.64</div>
+ *   </div>
+ * </div>
+ * ```
+ * Les montants sont signés avec un point décimal ("+0.68", "-5.64").
+ */
 export function parseLoyaltyHistoryPage(html: string): LoyaltyTransaction[] {
   const transactions: LoyaltyTransaction[] = [];
 
-  // Parcourir chaque ligne <tr>...</tr> du tableau
-  const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/g;
-  let trMatch: RegExpExecArray | null;
+  const blockPattern =
+    /class="m-waaohHistory"[^>]*>[\s\S]*?m-waaohHistory__date[^>]*>([^<]*)<[\s\S]*?m-waaohHistory__deliveryType[^>]*>([^<]*)<[\s\S]*?m-waaohHistory__deliveryPlace[^>]*>([^<]*)<[\s\S]*?m-waaohHistory__amount[^"]*"[^>]*>([^<]*)</g;
 
-  while ((trMatch = trRegex.exec(html)) !== null) {
-    const row = trMatch[1];
-
-    // Extraire les valeurs de chaque <td>
-    const tdValues: string[] = [];
-    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
-    let tdMatch: RegExpExecArray | null;
-
-    while ((tdMatch = tdRegex.exec(row)) !== null) {
-      // Extraire les nœuds texte (séquences de caractères non-balise)
-      const textNodes = tdMatch[1].match(/[^<>]+/g) ?? [];
-      tdValues.push(textNodes.join(' ').replace(/\s+/g, ' ').trim());
-    }
-
-    // On attend exactement 4 colonnes : date, canal, magasin, montant
-    if (tdValues.length !== 4) continue;
-
-    const [date, channel, storeName, rawAmount] = tdValues;
+  let m: RegExpExecArray | null;
+  while ((m = blockPattern.exec(html)) !== null) {
+    const date = decode(m[1]).trim();
+    const channel = decode(m[2]).trim();
+    const storeName = decode(m[3]).trim();
+    const rawAmount = decode(m[4]).trim();
 
     // Valider le format de date DD/MM/YYYY
     if (!/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
 
-    // Parser le montant signé (ex. "+0,53", "-2,00", "+0,53 €")
+    // Parser le montant signé (ex. "+0.68", "-5.64", "+0,53 €")
     const isNegative = rawAmount.startsWith('-');
-    // Supprimer le signe et le symbole € éventuel pour obtenir la partie numérique
-    const numPartRaw = rawAmount.replace(/^[+-]/, '').replace(/\s*€\s*$/, '').trim();
-    const numPart = numPartRaw.replace(/[\s\u00A0]/g, '');
+    const numPart = rawAmount
+      .replace(/^[+-]/, '')
+      .replace(/\s*€\s*$/, '')
+      .replace(/[\s\u00A0]/g, '');
 
-    // parsePrice ne gère que les montants avec 2 décimales : ignorer la ligne si ce n'est pas le cas.
+    // parsePrice ne gère que les montants avec 2 décimales : ignorer la ligne sinon.
     if (!/^\d+[,.]\d{2}$/.test(numPart)) continue;
 
     const absCents = parsePrice(numPart);

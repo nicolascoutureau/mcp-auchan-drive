@@ -265,7 +265,9 @@ async function main(): Promise<void> {
     {
       description:
         'Récupère l\'historique des commandes drive Auchan. ' +
-        'Retourne la liste des commandes avec statut, magasin, date, nombre de produits et total.',
+        'Retourne la liste des commandes avec statut, date et référence. ' +
+        'Le nombre de produits et le total sont lazy-loadés par le site et peuvent être à zéro : ' +
+        'utiliser get_order_detail pour les obtenir de façon fiable.',
       inputSchema: {
         period: z
           .enum(['10days', '30days', '3months', '6months', 'current_year', '2025', '2024'])
