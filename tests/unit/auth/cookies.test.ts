@@ -58,19 +58,12 @@ const FULL_COOKIES = {
 };
 
 describe('ChromeCookieProvider', () => {
-  it('getCookie() retourne les 3 cookies dans le bon ordre', async () => {
+  it('getCookie() retourne tous les cookies (comportement navigateur)', async () => {
     const { loader } = makeLoader(FULL_COOKIES);
     const p = new ChromeCookieProvider('Default', loader);
     await expect(p.getCookie()).resolves.toBe(
-      'lark-session=sess1; datadome=dd1; lark-consentId=cid1',
+      'lark-session=sess1; datadome=dd1; lark-consentId=cid1; extra-cookie=ignored',
     );
-  });
-
-  it('les cookies supplémentaires sont ignorés dans la chaîne', async () => {
-    const { loader } = makeLoader(FULL_COOKIES);
-    const p = new ChromeCookieProvider('Default', loader);
-    const cookie = await p.getCookie();
-    expect(cookie).not.toContain('extra-cookie');
   });
 
   it('getCookie() appelle le loader une seule fois si appelé 2× (cache)', async () => {
@@ -90,17 +83,20 @@ describe('ChromeCookieProvider', () => {
     expect(loader).toHaveBeenCalledTimes(2);
   });
 
-  it('throw si datadome est absent', async () => {
+  it('datadome absent : avertit mais ne throw pas', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { loader } = makeLoader({ 'lark-session': 's', 'lark-consentId': 'c' });
     const p = new ChromeCookieProvider('Default', loader);
-    await expect(p.getCookie()).rejects.toThrow('datadome');
+    await expect(p.getCookie()).resolves.toBe('lark-session=s; lark-consentId=c');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('datadome'));
+    warn.mockRestore();
   });
 
   it('throw avec tous les cookies manquants listés', async () => {
     const { loader } = makeLoader({});
     const p = new ChromeCookieProvider('Default', loader);
     await expect(p.getCookie()).rejects.toThrow(
-      'Missing required cookies: lark-session, datadome, lark-consentId',
+      'Missing required cookies: lark-session, lark-consentId',
     );
   });
 });
