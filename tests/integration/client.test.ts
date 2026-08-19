@@ -254,37 +254,50 @@ describe('AuchanClient.removeFromCart', () => {
 
 // ── getLoyaltyHistory ─────────────────────────────────────────────────────────
 
-const LOYALTY_HISTORY_HTML = `
+// Page d'accueil fidélité contenant le lien historique avec l'id de carte
+const LOYALTY_HOME_HTML = `
 <html><body>
-<table>
-  <thead>
-    <tr><th>Date</th><th>Canal</th><th>Magasin</th><th>Montant</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>04/06/2026</td>
-      <td>Drive</td>
-      <td>Auchan Drive Saint-Genis (Chapônost)</td>
-      <td>+0,53</td>
-    </tr>
-    <tr>
-      <td>01/06/2026</td>
-      <td>Magasin</td>
-      <td>Auchan Supermarché Lyon Garibaldi</td>
-      <td>-2,00</td>
-    </tr>
-  </tbody>
-</table>
+<a href="/fidelite/ma-carte/historique?id=68750428">Historique de ma carte</a>
 </body></html>
 `;
 
+const LOYALTY_HISTORY_HTML = `
+<html><body>
+<div class="t-myLoyalty__content">
+  <div class="m-waaohHistory" role="listitem">
+    <div class="m-waaohHistory__date">04/06/2026</div>
+    <div class="m-waaohHistory__deliveryType">Drive</div>
+    <div class="m-waaohHistory__deliveryPlace">Auchan Drive Saint-Genis (Chapônost)</div>
+    <div class="m-waaohHistory__amount">+0.53</div>
+  </div>
+  <div class="m-waaohHistory" role="listitem">
+    <div class="m-waaohHistory__date">01/06/2026</div>
+    <div class="m-waaohHistory__deliveryType">Magasin</div>
+    <div class="m-waaohHistory__deliveryPlace">Auchan Supermarché Lyon Garibaldi</div>
+    <div class="m-waaohHistory__amount -minus">-2.00</div>
+  </div>
+</div>
+</body></html>
+`;
+
+// Mock fetch routé par URL (getLoyaltyHistory enchaîne accueil puis historique)
+function mockFetchLoyalty(historyHtml: string): typeof fetch {
+  return vi.fn(async (url: string) => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    json: () => Promise.reject(new Error('not json')),
+    text: () => Promise.resolve(url.includes('/historique') ? historyHtml : LOYALTY_HOME_HTML),
+  })) as unknown as typeof fetch;
+}
+
 describe('AuchanClient.getLoyaltyHistory', () => {
-  it('fetche /fidelite/ma-carte/historique et retourne les transactions parsées', async () => {
+  it('fetche l\'accueil fidélité puis l\'historique et retourne les transactions parsées', async () => {
     const client = new AuchanClient(
       fakeCookies(),
       fastThrottler(),
       'https://www.auchan.fr',
-      mockFetchHtml(LOYALTY_HISTORY_HTML),
+      mockFetchLoyalty(LOYALTY_HISTORY_HTML),
     );
     const history = await client.getLoyaltyHistory();
 
@@ -298,22 +311,32 @@ describe('AuchanClient.getLoyaltyHistory', () => {
     expect(history[1].amountFormatted).toBe('-2,00 €');
   });
 
-  it('appelle bien GET /fidelite/ma-carte/historique', async () => {
-    const fetchFn = mockFetchHtml(LOYALTY_HISTORY_HTML);
+  it('appelle GET /fidelite/accueil puis GET /fidelite/ma-carte/historique?id=…', async () => {
+    const fetchFn = mockFetchLoyalty(LOYALTY_HISTORY_HTML);
     const client = new AuchanClient(fakeCookies(), fastThrottler(), 'https://www.auchan.fr', fetchFn);
     await client.getLoyaltyHistory();
 
-    const [url] = (fetchFn as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
-    expect(url).toBe('https://www.auchan.fr/fidelite/ma-carte/historique');
+    const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0]).toBe('https://www.auchan.fr/fidelite/accueil');
+    expect(calls[1][0]).toBe('https://www.auchan.fr/fidelite/ma-carte/historique?id=68750428');
   });
 
-  it('retourne un tableau vide si la page ne contient aucune transaction', async () => {
-    const emptyHtml = '<html><body><table><tbody></tbody></table></body></html>';
+  it('lève une erreur si le lien historique est introuvable sur l\'accueil', async () => {
     const client = new AuchanClient(
       fakeCookies(),
       fastThrottler(),
       'https://www.auchan.fr',
-      mockFetchHtml(emptyHtml),
+      mockFetchHtml('<html><body>Connectez-vous</body></html>'),
+    );
+    await expect(client.getLoyaltyHistory()).rejects.toThrow('Lien historique introuvable');
+  });
+
+  it('retourne un tableau vide si la page ne contient aucune transaction', async () => {
+    const client = new AuchanClient(
+      fakeCookies(),
+      fastThrottler(),
+      'https://www.auchan.fr',
+      mockFetchLoyalty('<html><body><div class="t-myLoyalty__content"></div></body></html>'),
     );
     const history = await client.getLoyaltyHistory();
     expect(history).toEqual([]);
@@ -560,24 +583,28 @@ describe('AuchanClient.getFavorites', () => {
 
 const ORDERS_HTML = `
 <html><body>
-<ul>
-  <li>
-    <span>Drive</span>
-    <span>Auchan Drive Caluire</span>
-    <span>Commande n° 370069704 du 14 juin 2026</span>
-    <span>Enregistrée</span>
-    <span>14 Produits</span>
-    <span>38,62 €</span>
-    <a href="/client/mes-commandes/AROM-761999631/370069704">Modifier / Annuler...</a>
+<ul class="t-orders__wrapper t-orders__wrapper__list">
+  <li class="t-orders__item" data-fetch="/customer/async/orders/details/AROM-761999631/370069704/false">
+    <div class="p-order">
+      <span class="a-pointOfService__label">Retrait</span>
+      <span class="a-pointOfService__place">Auchan Drive Caluire</span>
+      <div class="p-order__reference">Commande n&#xB0; 370069704 du 14 juin 2026</div>
+      <span class="a-simplifiedState__label">Enregistr&#xE9;e</span>
+      <div class="m-productThumbnails__count"><span>14</span> Produits</div>
+      <div class="p-order__totalAmount">38.62 &#x20AC;</div>
+      <a href="/client/mes-commandes/AROM-761999631/370069704">Voir le d&#xE9;tail</a>
+    </div>
   </li>
-  <li>
-    <span>Drive</span>
-    <span>Auchan Drive Lyon Nord</span>
-    <span>Commande n° 370000001 du 2 mai 2026</span>
-    <span>Retirée</span>
-    <span>7 Produits</span>
-    <span>21,50 €</span>
-    <a href="/client/mes-commandes/AROM-123456789/370000001">Détails</a>
+  <li class="t-orders__item" data-fetch="/customer/async/orders/details/AROM-123456789/370000001/false">
+    <div class="p-order">
+      <span class="a-pointOfService__label">Retrait</span>
+      <span class="a-pointOfService__place">Auchan Drive Lyon Nord</span>
+      <div class="p-order__reference">Commande n&#xB0; 370000001 du 2 mai 2026</div>
+      <span class="a-simplifiedState__label">Retir&#xE9;e</span>
+      <div class="m-productThumbnails__count"><span>7</span> Produits</div>
+      <div class="p-order__totalAmount">21.50 &#x20AC;</div>
+      <a href="/client/mes-commandes/AROM-123456789/370000001">Voir le d&#xE9;tail</a>
+    </div>
   </li>
 </ul>
 </body></html>

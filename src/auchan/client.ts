@@ -183,7 +183,20 @@ export class AuchanClient {
 
   /** Historique des transactions de cagnotte (3 derniers mois). */
   async getLoyaltyHistory(): Promise<LoyaltyTransaction[]> {
-    const response = await this.request(`${this.baseUrl}/fidelite/ma-carte/historique`, {
+    // L'URL de l'historique exige l'id de carte en query (?id=NNN) — sans lui
+    // le site répond 303 vers une page marketing. L'id figure dans le lien
+    // « historique » de la page d'accueil fidélité.
+    const homeResponse = await this.request(`${this.baseUrl}/fidelite/accueil`, {
+      headers: { Accept: 'text/html' },
+    });
+    const home = await homeResponse.text();
+    const linkM = home.match(/href="(\/fidelite\/ma-carte\/historique\?id=\d+)"/);
+    if (!linkM) {
+      throw new Error(
+        'Lien historique introuvable sur /fidelite/accueil — êtes-vous connecté au programme de fidélité ?',
+      );
+    }
+    const response = await this.request(`${this.baseUrl}${linkM[1]}`, {
       headers: { Accept: 'text/html' },
     });
     return parseLoyaltyHistoryPage(await response.text());
