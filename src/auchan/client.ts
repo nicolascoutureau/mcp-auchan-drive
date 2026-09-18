@@ -235,7 +235,29 @@ export class AuchanClient {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body,
     });
-    return mapCart(await response.json());
+
+    const cart = mapCart(await response.json());
+
+    // POST /cart/update répond 200 même quand Auchan refuse la ligne (rupture
+    // au drive, produit non référencé…) : le panier revient simplement inchangé.
+    // Sans ce contrôle, l'ajout échoue en silence et l'appelant croit avoir réussi.
+    const before = this.quantityOf(raw, productId);
+    const after = cart.items.find((i) => i.productId === productId)?.quantity ?? 0;
+    if (after <= before) {
+      throw new Error(
+        `Produit ${productId} refusé par le drive : quantité inchangée (${before}). ` +
+        'Le plus souvent une rupture de stock — le flag "available" de la recherche ' +
+        'reflète le catalogue national, pas le stock du drive actif.',
+      );
+    }
+
+    return cart;
+  }
+
+  /** Quantité actuellement au panier pour un produit (0 si absent). */
+  private quantityOf(raw: RawCartResponse, productId: string): number {
+    const line = (raw?.cart?.cart?.items ?? []).find((l) => l.productId === productId);
+    return line?.desiredQuantity ?? 0;
   }
 
   /** Mise à jour de la quantité d'un article déjà dans le panier. */

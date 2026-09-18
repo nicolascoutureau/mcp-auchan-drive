@@ -36,6 +36,11 @@ export interface CookieProvider {
 }
 
 export interface FavoriteProduct {
+  /** Ids de l'offre — permettent d'appeler add_to_cart sans search_product préalable. */
+  productId?: string;
+  offerId?: string;
+  sellerId?: string;
+  sellerType?: string;
   name: string;
   brand?: string;
   format?: string;

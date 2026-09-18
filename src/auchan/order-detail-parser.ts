@@ -5,6 +5,17 @@
 
 import type { OrderDetail, OrderProduct } from '../types.js';
 import { parsePrice, decode } from './html-utils.js';
+import {
+  splitArticles,
+  extractProductLink,
+  extractFullName,
+  extractBrand,
+  stripBrandPrefix,
+  extractPrices,
+  extractQuantity,
+  extractHeadings,
+  categoryFor,
+} from './article-utils.js';
 
 /**
  * Parse la page HTML de détail d'une commande.
@@ -57,7 +68,9 @@ export function parseOrderDetailPage(
 
   // ── Magasin : nom ────────────────────────────────────────────────────────────
   const storeNameM = html.match(/m-storeInfo__name[^>]*>([^<]+)/)
-    ?? html.match(/class="[^"]*storeName[^"]*"[^>]*>([^<]+)/);
+    ?? html.match(/class="[^"]*storeName[^"]*"[^>]*>([^<]+)/)
+    // Fallback : lien vers la fiche magasin "/magasins/s-NNN"
+    ?? html.match(/href="\/magasins\/s-\d+"[^>]*>\s*([^<]{3,80})/);
   const storeName = storeNameM ? decode(storeNameM[1].trim()) : '';
 
   // ── Magasin : adresse ────────────────────────────────────────────────────────
@@ -69,7 +82,9 @@ export function parseOrderDetailPage(
 
   // ── Total ─────────────────────────────────────────────────────────────────────
   const totalM = html.match(/m-orderSummary__totalPrice[^>]*>([^<]+)/)
-    ?? html.match(/orderTotal[^>]*>([^<]+)/);
+    ?? html.match(/orderTotal[^>]*>([^<]+)/)
+    // Fallback : "Total" suivi du montant, quelles que soient les classes
+    ?? html.match(/>\s*Total\s*<[\s\S]{0,400}?(\d{1,4}[.,]\d{2}\s*€)/i);
   const totalFormatted = totalM ? decode(totalM[1].trim()) : '';
   const total = parsePrice(totalFormatted);
 
@@ -112,8 +127,9 @@ function parseProducts(html: string): OrderProduct[] {
   }
 
   if (catMatches.length === 0) {
-    // Pas de catégories : parser tous les produits sans catégorie
-    return parseProductBlocks(html, '');
+    // Markup BEM absent (Auchan a renommé ses classes) : passe structurelle
+    const legacy = parseProductBlocks(html, '');
+    return legacy.length > 0 ? legacy : parseArticleProducts(html);
   }
 
   for (let i = 0; i < catMatches.length; i++) {
@@ -121,6 +137,37 @@ function parseProducts(html: string): OrderProduct[] {
     const end = i + 1 < catMatches.length ? catMatches[i + 1].index : html.length;
     const section = html.slice(start, end);
     products.push(...parseProductBlocks(section, catMatches[i].category));
+  }
+
+  return products.length > 0 ? products : parseArticleProducts(html);
+}
+
+/**
+ * Passe structurelle : chaque produit commandé est un <article> contenant
+ * un lien "/pr-Cxxxxxx", un prix et "Quantité : N". Indépendant des classes CSS.
+ */
+function parseArticleProducts(html: string): OrderProduct[] {
+  const products: OrderProduct[] = [];
+  const headings = extractHeadings(html);
+
+  for (const { start, html: block } of splitArticles(html)) {
+    if (!extractProductLink(block)) continue;
+
+    const fullName = extractFullName(block);
+    if (!fullName) continue;
+
+    const brand = extractBrand(block);
+    const prices = extractPrices(block);
+    const priceFormatted = prices[0] ?? '';
+
+    products.push({
+      name: stripBrandPrefix(fullName, brand) || fullName,
+      brand,
+      quantity: extractQuantity(block) ?? 1,
+      price: parsePrice(priceFormatted),
+      priceFormatted,
+      category: categoryFor(headings, start),
+    });
   }
 
   return products;

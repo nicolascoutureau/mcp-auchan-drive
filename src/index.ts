@@ -315,12 +315,31 @@ async function main(): Promise<void> {
         'Liste les produits favoris (achetés régulièrement). ' +
         'Retourne un tableau plat de produits, chacun avec un champ category. ' +
         'Affiche le prix actuel et les promotions en cours. ' +
-        'Utiliser search_product(name) pour obtenir l\'UUID si add_to_cart est nécessaire.',
+        'Chaque favori porte son productId : add_to_cart est directement appelable, ' +
+        'sans search_product préalable.',
       inputSchema: {},
     },
     async () => {
       try {
         const favorites = await client.getFavorites();
+        // Les favoris portent offerId / sellerId : on alimente le cache pour que
+        // add_to_cart fonctionne dans la foulée, sans search_product intermédiaire.
+        for (const f of favorites) {
+          if (f.productId && f.offerId && f.sellerId && f.sellerType) {
+            searchCache.set(f.productId, {
+              productId: f.productId,
+              offerId: f.offerId,
+              sellerId: f.sellerId,
+              sellerType: f.sellerType,
+              name: f.name,
+              brand: f.brand,
+              price: f.price,
+              format: f.format,
+              available: f.available,
+              catalogCode: f.productCode,
+            });
+          }
+        }
         return ok(favorites);
       } catch (err) {
         return fail(err);

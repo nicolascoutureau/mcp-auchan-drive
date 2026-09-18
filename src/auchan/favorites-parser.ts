@@ -1,152 +1,130 @@
 /**
  * favorites-parser.ts — Parse le HTML de GET /client/mes-produits-preferes
- * Même approche que parser.ts : regex sur le HTML brut, pas de cheerio/jsdom.
  *
- * Structure de la page :
- *   - Sections de catégories (class "t-myFavorites__section")
- *   - Titre de catégorie (class "t-myFavorites__categoryTitle")
- *   - Cartes produits similaires à /recherche (product-thumbnail__description, product-price…)
+ * La page réutilise le même composant de carte produit que /recherche :
+ *   <div class="quantity-selector" data-product-id data-offer-id data-seller-id …>
+ * On s'ancre donc sur ces data-attributes plutôt que sur des classes BEM de
+ * mise en page (t-myFavorites__*), qu'Auchan renomme régulièrement — c'est ce
+ * qui rendait get_favorites systématiquement vide.
+ *
+ * Bonus : ces attributs portent offerId / sellerId, donc les favoris retournés
+ * sont directement ajoutables au panier sans passer par search_product.
  */
 
 import type { FavoriteProduct } from '../types.js';
 import { parsePrice, decode } from './html-utils.js';
 
-// Taille de la fenêtre de contexte utilisée en l'absence de balises <article>
-const FALLBACK_CTX_BEFORE = 500;  // chars en arrière depuis le lien produit
-const FALLBACK_CTX_AFTER  = 3000; // chars en avant depuis le lien produit
+/** Valeur d'un attribut depuis une balise ouvrante. */
+function attr(tag: string, name: string): string | undefined {
+  return tag.match(new RegExp(`${name}="([^"]*)"`))?.[1];
+}
 
 /**
- * Parse le HTML brut de /client/mes-produits-preferes et retourne un tableau plat
- * de FavoriteProduct. Chaque produit porte un champ `category` issu de la section
- * de la page dans laquelle il apparaît.
- *
- * Stratégie :
- *   1. Repérer les débuts de sections de catégorie (class "t-myFavorites__section")
- *   2. Pour chaque section, extraire le titre de catégorie
- *   3. Pour chaque produit (href "/…/pr-Cxxxxxx"), extraire les champs depuis le contexte HTML
+ * Rayons de la page : chaque section porte un titre visible. On récupère leur
+ * position pour rattacher ensuite chaque produit au dernier rayon qui le précède.
  */
-export function parseFavoritesPage(html: string): FavoriteProduct[] {
-  const results: FavoriteProduct[] = [];
+function extractSections(html: string): Array<{ index: number; label: string }> {
+  const sections: Array<{ index: number; label: string }> = [];
 
-  // ── Localiser les sections de catégorie ──────────────────────────────────────
-  const sectionClassRe = /class="[^"]*t-myFavorites__section[^"]*"/g;
-  const sectionStarts: number[] = [];
-  let sMatch: RegExpExecArray | null;
-
-  while ((sMatch = sectionClassRe.exec(html)) !== null) {
-    // Remonter jusqu'au '<' ouvrant du tag
-    let tagStart = sMatch.index;
-    while (tagStart > 0 && html[tagStart] !== '<') tagStart--;
-    sectionStarts.push(tagStart);
+  // Markup courant : une carte "rayon" avec <img alt="Animalerie"> + lien /ca-nNN
+  const rayonRe = /<img[^>]*\salt="([^"]{2,40})"[^>]*>(?:(?!<article)[\s\S]){0,800}?href="\/ca-[\w-]+"/g;
+  let m: RegExpExecArray | null;
+  while ((m = rayonRe.exec(html)) !== null) {
+    sections.push({ index: m.index, label: decode(m[1]).trim() });
   }
 
-  if (sectionStarts.length === 0) return results;
+  // Markup historique
+  const legacyRe = /t-myFavorites__categoryTitle[^>]*>([^<]+)</g;
+  while ((m = legacyRe.exec(html)) !== null) {
+    sections.push({ index: m.index, label: decode(m[1]).trim() });
+  }
 
-  // ── Parser chaque section ────────────────────────────────────────────────────
-  for (let i = 0; i < sectionStarts.length; i++) {
-    const sStart = sectionStarts[i];
-    const sEnd = i + 1 < sectionStarts.length ? sectionStarts[i + 1] : html.length;
-    const sHtml = html.slice(sStart, sEnd);
+  return sections.sort((a, b) => a.index - b.index);
+}
 
-    // Titre de catégorie
-    const catM = sHtml.match(/t-myFavorites__categoryTitle[^>]*>([^<]+)</);
-    const category = catM ? decode(catM[1].trim()) : '';
+function categoryAt(sections: Array<{ index: number; label: string }>, pos: number): string {
+  let label = '';
+  for (const s of sections) {
+    if (s.index <= pos) label = s.label;
+    else break;
+  }
+  return label;
+}
 
-    // ── Délimitation des cartes produits ────────────────────────────────────
-    // On utilise <article comme frontière entre cartes : chaque produit est
-    // encapsulé dans un <article ...>. Sinon, on délimite par les liens produits.
-    const articleStarts: number[] = [];
-    const artRe = /<article/g;
-    let artM: RegExpExecArray | null;
-    while ((artM = artRe.exec(sHtml)) !== null) {
-      articleStarts.push(artM.index);
+export function parseFavoritesPage(html: string): FavoriteProduct[] {
+  const results: FavoriteProduct[] = [];
+  const sections = extractSections(html);
+  const seen = new Set<string>();
+
+  const tagRe = /<div[^>]+data-product-id="[^"]+"[^>]*>/g;
+  let tagMatch: RegExpExecArray | null;
+  let prevSelectorEnd = 0;
+
+  while ((tagMatch = tagRe.exec(html)) !== null) {
+    const tag = tagMatch[0];
+    if (!tag.includes('quantity-selector')) continue;
+
+    const productId = attr(tag, 'data-product-id');
+    if (!productId || seen.has(productId)) continue;
+    seen.add(productId);
+
+    // La description précède le sélecteur de quantité, parfois de plusieurs Ko.
+    // La fenêtre arrière doit s'arrêter à la carte courante, sinon on récupère
+    // le nom et le prix du produit précédent.
+    const windowStart = Math.max(0, tagMatch.index - 4000);
+    const prevArticle = html.lastIndexOf('<article', tagMatch.index);
+    const start = Math.max(windowStart, prevArticle === -1 ? 0 : prevArticle, prevSelectorEnd);
+    const ctx = html.slice(start, Math.min(html.length, tagMatch.index + 500));
+    prevSelectorEnd = tagMatch.index + tag.length;
+
+    const descM = ctx.match(
+      /class="[^"]*product-thumbnail__description[^"]*"[^>]*>([\s\S]*?)<\/p>/,
+    );
+    const descHtml = descM?.[1] ?? '';
+
+    const brandM = descHtml.match(/<strong[^>]*>\s*([^<]+)\s*<\/strong>/);
+    const brand = brandM ? decode(brandM[1].trim()) : undefined;
+
+    // Nom = description privée du <strong> de marque.
+    const nameRaw = descHtml.replace(/<strong[^>]*>[\s\S]*?<\/strong>/g, '');
+    let name = decode(nameRaw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+
+    // Filet : le libellé complet figure dans l'aria-label du bouton d'ajout.
+    if (!name) {
+      const aria = ctx.match(/aria-label="Ajouter\s+((?!le produit)[^"]*?)\s+au panier"/i)?.[1];
+      name = aria ? decode(aria).replace(/\s+/g, ' ').trim() : '';
     }
+    if (!name) continue;
 
-    // ── Produits dans la section ──────────────────────────────────────────────
-    // Ancrage : href vers un produit de type "/slug/pr-Cxxxxxx"
-    const productLinkRe = /href="(\/[^"]*\/pr-(C\d+))"/g;
-    let pMatch: RegExpExecArray | null;
-    const seen = new Set<string>();
+    // (?![\w-]) empêche de matcher "product-price-perUnit", qui contient "product-price".
+    const priceM = ctx.match(/class="[^"]*product-price(?![\w-])[^"]*"[^>]*>\s*([\d\s,.'€]+)/);
+    const priceFormatted = priceM ? priceM[1].replace(/\s+/g, ' ').trim() : '';
 
-    while ((pMatch = productLinkRe.exec(sHtml)) !== null) {
-      const productUrl = pMatch[1];
-      const productCode = pMatch[2];
+    const fmtM = ctx.match(/class="[^"]*product-attribute[^"]*"[^>]*>\s*([^<"]{1,40})/);
+    const ppuM = ctx.match(/([\d]+[,.][\d]{2}\s*€\s*\/\s*\w+)/);
+    const promoM = ctx.match(/class="[^"]*a-promotionLabel[^"]*"[^>]*>\s*([^<]+)/);
+    const hrefM = ctx.match(/href="(\/[^"]*\/pr-(C\d+))"/);
 
-      // Dédoublonnage (plusieurs <a> peuvent pointer vers le même produit)
-      if (seen.has(productCode)) continue;
-      seen.add(productCode);
+    // data-stock est la seule source fiable du stock du drive actif.
+    const stock = Number(attr(tag, 'data-stock') ?? '0');
 
-      const linkPos = pMatch.index;
-
-      // Contexte borné par les <article> (évite le débordement vers la carte précédente)
-      let ctxStart = 0;
-      let ctxEnd = sHtml.length;
-
-      if (articleStarts.length > 0) {
-        // Début : dernier <article avant le lien courant
-        for (const pos of articleStarts) {
-          if (pos <= linkPos) ctxStart = pos;
-        }
-        // Fin : premier <article après le lien courant
-        for (const pos of articleStarts) {
-          if (pos > linkPos) { ctxEnd = pos; break; }
-        }
-      } else {
-        // Fallback : fenêtre fixe autour du lien
-        ctxStart = Math.max(0, linkPos - FALLBACK_CTX_BEFORE);
-        ctxEnd = Math.min(sHtml.length, linkPos + FALLBACK_CTX_AFTER);
-      }
-
-      const ctx = sHtml.slice(ctxStart, ctxEnd);
-
-      // ── Nom et marque ───────────────────────────────────────────────────────
-      const descM = ctx.match(
-        /class="[^"]*product-thumbnail__description[^"]*"[^>]*>([\s\S]*?)<\/p>/,
-      );
-      const descHtml = descM?.[1] ?? '';
-
-      const brandM = descHtml.match(/<strong[^>]*>\s*([^<]+)\s*<\/strong>/);
-      const brand = brandM ? decode(brandM[1].trim()) : undefined;
-
-      // Nom = description sans le tag <strong> de marque.
-      const nameRaw = descHtml.replace(/<strong[^>]*>[\s\S]*?<\/strong>/g, '');
-      const name = decode(nameRaw.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim());
-
-      // ── Format / conditionnement ─────────────────────────────────────────────
-      const fmtM = ctx.match(/class="[^"]*product-attribute[^"]*"[^>]*>\s*([^<]+)/);
-      const format = fmtM ? decode(fmtM[1].trim()) : undefined;
-
-      // ── Prix principal ───────────────────────────────────────────────────────
-      const priceM = ctx.match(/class="[^"]*product-price[^"]*"[^>]*>\s*([\d\s,.'€]+)/);
-      const priceFormatted = priceM ? priceM[1].trim() : '';
-      const price = parsePrice(priceFormatted);
-
-      // ── Prix à l'unité (ex : "1,29 € / l") ──────────────────────────────────
-      const ppuM = ctx.match(/class="[^"]*product-price-perUnit[^"]*"[^>]*>\s*([^<]+)/);
-      const pricePerUnit = ppuM ? decode(ppuM[1].trim()) : undefined;
-
-      // ── Promotion ────────────────────────────────────────────────────────────
-      const promoM = ctx.match(/class="[^"]*a-promotionLabel[^"]*"[^>]*>\s*([^<]+)/);
-      const promo = promoM ? decode(promoM[1].trim()) : undefined;
-
-      // ── Disponibilité ────────────────────────────────────────────────────────
-      const qsM = ctx.match(/<[^>]+class="[^"]*quantity-selector[^"]*"[^>]*>/);
-      const available = qsM != null && !qsM[0].includes('disabled');
-
-      results.push({
-        name,
-        brand,
-        format,
-        category,
-        price,
-        priceFormatted,
-        pricePerUnit,
-        promo,
-        productUrl,
-        productCode,
-        available,
-      });
-    }
+    results.push({
+      productId,
+      offerId: attr(tag, 'data-offer-id'),
+      sellerId: attr(tag, 'data-seller-id'),
+      sellerType: attr(tag, 'data-seller-type'),
+      name,
+      brand,
+      format: fmtM ? decode(fmtM[1].trim()) : undefined,
+      category: categoryAt(sections, tagMatch.index),
+      price: parsePrice(priceFormatted),
+      priceFormatted,
+      pricePerUnit: ppuM ? decode(ppuM[1].trim()) : undefined,
+      promo: promoM ? decode(promoM[1].trim()) : undefined,
+      productUrl: hrefM?.[1] ?? '',
+      productCode: hrefM?.[2],
+      available: stock > 0 && !tag.includes('data-disable-button="true"'),
+    });
   }
 
   return results;
