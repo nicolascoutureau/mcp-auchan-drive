@@ -74,20 +74,28 @@ export function stripBrandPrefix(name: string, brand: string): string {
   return name.replace(new RegExp(`^${esc}\\s+`, 'i'), '').trim();
 }
 
-/** Tous les montants "5,29 €" d'un bloc, dans l'ordre d'apparition. */
+/**
+ * Tous les montants "5,29 €" d'un bloc, dans l'ordre d'apparition.
+ * Le HTML est décodé au préalable : Auchan encode l'euro en &#x20AC;.
+ */
 export function extractPrices(block: string): string[] {
   const out: string[] = [];
+  const text = decode(block);
   const re = /(\d{1,4}[.,]\d{2})\s*(?:&nbsp;|\s)?€/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(block)) !== null) out.push(`${m[1]} €`);
+  while ((m = re.exec(text)) !== null) out.push(`${m[1]} €`);
   return out;
 }
 
-/** Quantité commandée : "Quantité : 4", "x4", "4 ×". */
+/**
+ * Quantité commandée : "Quantité : 4", "x4", "4 ×".
+ * Décodage préalable obligatoire : le HTML porte "Quantit&#xE9; : 4".
+ */
 export function extractQuantity(block: string): number | undefined {
+  const text = decode(block);
   const m =
-    block.match(/Quantit[eé]\s*(?:&nbsp;|\s)*:\s*(\d+)/i) ??
-    block.match(/[×x]\s*(\d{1,3})\b/);
+    text.match(/Quantit[eé]\s*(?:&nbsp;|\s)*:\s*(\d+)/i) ??
+    text.match(/[×x]\s*(\d{1,3})\b/);
   return m ? parseInt(m[1], 10) : undefined;
 }
 

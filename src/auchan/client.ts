@@ -202,6 +202,18 @@ export class AuchanClient {
     return parseLoyaltyHistoryPage(await response.text());
   }
 
+  /**
+   * Récupère le HTML brut d'une page du site.
+   * Sert au diagnostic : quand un parser rend un champ vide, il faut pouvoir
+   * distinguer « la donnée n'est pas dans le HTML servi » (rendu côté client)
+   * d'un simple sélecteur devenu obsolète.
+   */
+  async fetchRawHtml(path: string): Promise<string> {
+    const url = path.startsWith('http') ? path : `${this.baseUrl}${path}`;
+    const response = await this.request(url, { headers: { Accept: 'text/html' } });
+    return response.text();
+  }
+
   /** Ajout d'un produit au panier (sans id — article nouveau). */
   async addToCart(
     productId: string,

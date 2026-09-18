@@ -58,17 +58,26 @@ export function parseOrderDetailPage(
   ) ?? html.match(/aria-current="[^"]*"[^>]*>[\s\S]*?<span[^>]*>([^<]+)/i);
 
   // Fallback : prendre le dernier span dans la liste de statuts non vide
-  const status = statusActiveM
-    ? decode(statusActiveM[1].trim())
-    : extractLastStatus(html);
+  // Markup courant : <span class="a-simplifiedState__label">Retirée</span>
+  const simplifiedM = html.match(/a-simplifiedState__label[^>]*>([^<]+)/);
+
+  const status = simplifiedM
+    ? decode(simplifiedM[1].trim())
+    : statusActiveM
+      ? decode(statusActiveM[1].trim())
+      : extractLastStatus(html);
 
   // ── Créneau de retrait ───────────────────────────────────────────────────────
-  const pickupM = html.match(/Retrait pr[eé]vu\s+le\s*:\s*([^\n<]+)/i);
+  // Sur du HTML brut le libellé s'écrit "Retrait pr&#xE9;vu le:" : il faut
+  // décoder avant de matcher, sinon [eé] ne trouve jamais l'accent.
+  const pickupM = decode(html).match(/Retrait pr[eé]vu\s+le\s*:\s*([^\n<]+)/i);
   const pickupSlot = pickupM ? decode(pickupM[1].trim()) : undefined;
 
   // ── Magasin : nom ────────────────────────────────────────────────────────────
   const storeNameM = html.match(/m-storeInfo__name[^>]*>([^<]+)/)
     ?? html.match(/class="[^"]*storeName[^"]*"[^>]*>([^<]+)/)
+    // Markup courant : <span class="a-pointOfService__place">Auchan Drive …</span>
+    ?? html.match(/a-pointOfService__place[^>]*>([^<]+)/)
     // Fallback : lien vers la fiche magasin "/magasins/s-NNN"
     ?? html.match(/href="\/magasins\/s-\d+"[^>]*>\s*([^<]{3,80})/);
   const storeName = storeNameM ? decode(storeNameM[1].trim()) : '';
@@ -81,7 +90,11 @@ export function parseOrderDetailPage(
     : '';
 
   // ── Total ─────────────────────────────────────────────────────────────────────
-  const totalM = html.match(/m-orderSummary__totalPrice[^>]*>([^<]+)/)
+  const totalM =
+    // Markup courant : bloc récapitulatif "Total" en pied de page
+    html.match(/m-receipt__total[\s\S]{0,200}?m-receipt__value[^>]*>([^<]+)/)
+    ?? html.match(/p-detail__totalAmount[\s\S]{0,200}?a-amount[^>]*>([^<]+)/)
+    ?? html.match(/m-orderSummary__totalPrice[^>]*>([^<]+)/)
     ?? html.match(/orderTotal[^>]*>([^<]+)/)
     // Fallback : "Total" suivi du montant, quelles que soient les classes
     ?? html.match(/>\s*Total\s*<[\s\S]{0,400}?(\d{1,4}[.,]\d{2}\s*€)/i);
@@ -126,8 +139,13 @@ function parseProducts(html: string): OrderProduct[] {
     catMatches.push({ index: cM.index, category: decode(cM[1].trim()) });
   }
 
+  // Markup courant : chaque ligne de commande est un bloc "m-productItem"
+  // portant l'article produit et son <aside> prix / quantité.
+  const items = parseProductItems(html);
+  if (items.length > 0) return items;
+
   if (catMatches.length === 0) {
-    // Markup BEM absent (Auchan a renommé ses classes) : passe structurelle
+    // Markup BEM historique, puis passe structurelle générique
     const legacy = parseProductBlocks(html, '');
     return legacy.length > 0 ? legacy : parseArticleProducts(html);
   }
@@ -140,6 +158,71 @@ function parseProducts(html: string): OrderProduct[] {
   }
 
   return products.length > 0 ? products : parseArticleProducts(html);
+}
+
+/**
+ * Markup courant de /client/mes-commandes/{ref}/{num} :
+ *
+ *   <div class="o-products__line m-productItem">
+ *     <article class="product-thumbnail m-productItem__product">
+ *       <p class="product-thumbnail__description"><strong>PURINA ONE</strong> Bifensis…</p>
+ *     </article>
+ *     <aside class="m-productItem__aside">
+ *       <div class="a-amount__amount">13.88 &#x20AC;</div>
+ *       <div class="p-detail__productQuantity">Quantit&#xE9; : 3</div>
+ *     </aside>
+ *   </div>
+ *
+ * Le prix et la quantité vivent dans l'<aside>, frère de l'<article> : un
+ * découpage borné à <article> les perdrait. On découpe donc sur m-productItem.
+ *
+ * Cette page ne groupe pas les produits par rayon : category reste vide.
+ */
+function parseProductItems(html: string): OrderProduct[] {
+  const products: OrderProduct[] = [];
+
+  const blockRe = /class="[^"]*m-productItem(?![\w-])[^"]*"/g;
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(html)) !== null) {
+    let tagStart = m.index;
+    while (tagStart > 0 && html[tagStart] !== '<') tagStart--;
+    starts.push(tagStart);
+  }
+
+  for (let i = 0; i < starts.length; i++) {
+    const block = html.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : html.length);
+
+    // L'aside n'est présent que sur le bloc de ligne, pas sur l'article interne :
+    // on ignore les blocs qui n'en portent pas pour éviter les doublons.
+    if (!block.includes('m-productItem__aside')) continue;
+
+    const descM = block.match(
+      /class="[^"]*product-thumbnail__description[^"]*"[^>]*>([\s\S]*?)<\/p>/,
+    );
+    const descHtml = descM?.[1] ?? '';
+    const brandM = descHtml.match(/<strong[^>]*>\s*([^<]+)\s*<\/strong>/);
+    const brand = brandM ? decode(brandM[1].trim()) : '';
+    const nameRaw = descHtml.replace(/<strong[^>]*>[\s\S]*?<\/strong>/g, '');
+    const name = decode(nameRaw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
+    if (!name) continue;
+
+    const priceM = block.match(/a-amount__amount[^>]*>([^<]+)/);
+    const priceFormatted = priceM ? decode(priceM[1].trim()) : '';
+
+    const qtyM = decode(block).match(/productQuantity[^>]*>\s*Quantit[eé]\s*:\s*(\d+)/i);
+
+    products.push({
+      name,
+      brand,
+      quantity: qtyM ? parseInt(qtyM[1], 10) : (extractQuantity(block) ?? 1),
+      price: parsePrice(priceFormatted),
+      priceFormatted,
+      category: '',
+    });
+  }
+
+  return products;
 }
 
 /**

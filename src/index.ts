@@ -347,6 +347,44 @@ async function main(): Promise<void> {
     },
   );
 
+  // ── 13bis. debug_page_html ───────────────────────────────────────────────────
+  server.registerTool(
+    'debug_page_html',
+    {
+      description:
+        "Diagnostic : renvoie des extraits du HTML brut servi par auchan.fr pour un chemin donné. " +
+        "Sert à savoir si une donnée manquante est absente du HTML (rendue côté client) " +
+        "ou simplement mal ciblée par un parser. Sans pattern, renvoie les premiers Ko.",
+      inputSchema: {
+        path: z.string().describe("Chemin du site (ex : '/client/mes-produits-preferes')"),
+        pattern: z.string().optional().describe('Regex ; renvoie les fenêtres autour de chaque occurrence'),
+        window: z.number().int().min(100).max(4000).default(600).describe('Caractères de contexte autour de chaque occurrence'),
+        max_matches: z.number().int().min(1).max(20).default(5).describe("Nombre maximum d'occurrences"),
+      },
+    },
+    async ({ path, pattern, window, max_matches }) => {
+      try {
+        const html = await client.fetchRawHtml(path);
+        if (!pattern) {
+          return ok({ length: html.length, head: html.slice(0, 3000) });
+        }
+        const re = new RegExp(pattern, 'gi');
+        const excerpts: Array<{ index: number; text: string }> = [];
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) !== null && excerpts.length < max_matches) {
+          excerpts.push({
+            index: m.index,
+            text: html.slice(Math.max(0, m.index - window), m.index + window),
+          });
+          if (m.index === re.lastIndex) re.lastIndex++;
+        }
+        return ok({ length: html.length, matches: excerpts.length, excerpts });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
   // ── 14. get_order_detail ─────────────────────────────────────────────────────
   server.registerTool(
     'get_order_detail',
